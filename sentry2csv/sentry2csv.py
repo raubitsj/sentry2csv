@@ -80,13 +80,16 @@ async def enrich_issue(
 
 
 async def fetch_issues(
-    session: aiohttp.ClientSession, issues_url: str, query_params: List[QueryParam]
+    session: aiohttp.ClientSession, issues_url: str, query_params: List[QueryParam], search: str, pages: int
 ) -> List[Dict[str, Any]]:
     """Fetch all issues from Sentry."""
     page_count = 1
     issues: List[Dict[str, Any]] = []
     cursor = ""
-    query_str = " ".join(str(param) for param in query_params)
+    query_list = [str(param) for param in query_params]
+    if search:
+        query_list.append(search)
+    query_str = " ".join(query_list)
     while True:
         print(f"Fetching issues page {page_count}")
         resp, links = await fetch(
@@ -104,6 +107,8 @@ async def fetch_issues(
             break
         cursor = str(links["next"]["cursor"])
         page_count += 1
+        if pages and page_count > pages:
+            break
     return issues
 
 
@@ -156,13 +161,15 @@ async def export(  # pylint:disable=too-many-arguments
     query_params: List[QueryParam],
     enrich: Optional[List[Enrichment]] = None,
     host: str = SENTRY_HOST,
+    search_params: str = "",
+    pages: int = 0,
 ):
     """Export data from Sentry to CSV."""
     enrichments: List[Enrichment] = enrich or []
     issues_url = f"https://{host}/api/0/projects/{organization}/{project}/issues/"
     async with aiohttp.ClientSession(headers={"Authorization": f"Bearer {token}"}) as session:
         try:
-            issues = await fetch_issues(session, issues_url, query_params)
+            issues = await fetch_issues(session, issues_url, query_params, search_params, pages)
             if enrichments:
                 print(f"Enriching {len(issues)} issues with event data...")
                 await asyncio.gather(
@@ -209,6 +216,12 @@ def main():
         required=False,
         help="The name of the environment to query",
     )
+    parser.add_argument(
+        "--query", action="append", nargs=2, metavar=("KEY", "VALUE"), help="Query tokens")
+    parser.add_argument(
+        "--search", default="", metavar="SEARCH_STRING", help="Search string")
+    parser.add_argument(
+        "--pages", default=0, metavar="LIMIT_PAGES", type=int, help="Max number of pages")
     parser.add_argument("organization", metavar="ORGANIZATION", nargs=1, help="The Sentry organization")
     parser.add_argument("project", metavar="PROJECT", nargs=1, help="The Sentry project")
     args = parser.parse_args()
@@ -220,6 +233,11 @@ def main():
         logger.setLevel(logging.WARNING)
     enrichments = extract_enrichment(args.enrich)
     query_params: List[QueryParam] = [QueryParam("is", "unresolved")]
+    if args.query:
+        query_params = []
+        for k, v in args.query:
+            if k and v:
+                query_params.append(QueryParam(k, v))
     if args.environment:
         query_params.append(QueryParam("environment", args.environment[0]))
     loop = asyncio.get_event_loop()
@@ -231,6 +249,8 @@ def main():
             enrich=enrichments,
             host=args.host[0],
             query_params=query_params,
+            search_params=args.search,
+            pages=args.pages,
         )
     )
 
